@@ -16,6 +16,11 @@ set -eux
 export DEBIAN_FRONTEND=noninteractive
 OUT=${OUT:-/w/built-debs}
 
+# The BINARY package we want. apt resolves this to its source package
+# (python-paho-mqtt), so the source name is never hardcoded here -- naming it
+# wrongly is exactly what broke the first attempt.
+BINARY=python3-paho-mqtt
+
 apt-get update
 apt-get install -y --no-install-recommends \
   dpkg-dev devscripts ca-certificates
@@ -25,12 +30,23 @@ echo "deb-src http://deb.debian.org/debian trixie main" \
   > /etc/apt/sources.list.d/trixie-src.list
 apt-get update
 
-cd /tmp
-apt-get source paho-mqtt
-cd paho-mqtt-*/
+echo "--- source package apt maps ${BINARY} to ---"
+apt-cache showsrc "$BINARY" | sed -n 's/^Package: //p' | head -1
 
-echo "--- upstream version being backported ---"
-dpkg-parsechangelog -S Version
+cd /tmp
+apt-get source "$BINARY"
+srcdir=$(find . -maxdepth 1 -type d -name '*paho*' | head -1)
+[ -n "$srcdir" ] || { echo "no source directory unpacked"; exit 1; }
+cd "$srcdir"
+
+version=$(dpkg-parsechangelog -S Version)
+echo "--- upstream version being backported: $version ---"
+
+# Guard against silently backporting the wrong thing: the whole point is >= 2.
+case "$version" in
+  2.*|[3-9].*) : ;;
+  *) echo "refusing to backport $version -- expected 2.x or newer"; exit 1 ;;
+esac
 
 # If bookworm cannot satisfy these, the backport is not viable as a plain
 # rebuild and the failure should be loud rather than worked around.
@@ -40,8 +56,7 @@ apt-get build-dep -y --no-install-recommends ./
 # host that later moves to trixie upgrades cleanly rather than being pinned here.
 dch --local "~bpo12+" --distribution bookworm \
   "Rebuild for bookworm: sensors2mqtt requires paho-mqtt >= 2, which bookworm does not ship."
-echo "--- backport version ---"
-dpkg-parsechangelog -S Version
+echo "--- backport version: $(dpkg-parsechangelog -S Version) ---"
 
 dpkg-buildpackage -us -uc -b
 
