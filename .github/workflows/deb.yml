@@ -1,0 +1,67 @@
+name: Debian package + apt repo
+
+# Rebuilds Debian trixie's paho-mqtt source on bookworm and publishes it as a
+# signed, bookworm-only apt repository on GitHub Pages.
+#
+# bookworm ships python3-paho-mqtt 1.6.1. sensors2mqtt requires paho-mqtt >= 2
+# because it calls mqtt.Client(CallbackAPIVersion.VERSION2, ...), which does not
+# exist in 1.x -- so without this package sensors2mqtt cannot be built or run on
+# bookworm at all.
+#
+# The schedule picks up a new upstream landing in trixie without needing a push.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+# Least privilege by default: only the publish job raises this, and only for
+# itself.
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    name: deb (bookworm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild the trixie source on bookworm
+        run: |
+          set -eux
+          mkdir -p built-debs
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/w" -w /w \
+            debian:bookworm sh packaging/build.sh
+
+      # The package is Architecture: all, so one build serves every
+      # architecture; the artifact name still carries "all" because the shared
+      # publish workflow regroups on debs-<suite>-<arch>.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs-bookworm-all
+          path: built-debs/*.deb
+          if-no-files-found: error
+
+  publish-apt:
+    # Build on pull requests to validate, but never publish from one.
+    if: github.event_name != 'pull_request'
+    needs: build-deb
+    # Scoped to this job alone, not the workflow.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+    with:
+      suites: "bookworm"
+      architectures: "all"
+      origin: paho-mqtt-bookworm
+      description: "paho-mqtt 2.x backported to Debian bookworm"
+      keyring-name: paho-mqtt-bookworm.gpg
+    secrets:
+      gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
